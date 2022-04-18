@@ -29,6 +29,8 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include "stdlib.h"
+#include "stdio.h"
 
 using namespace llvm;
 using namespace object;
@@ -151,11 +153,11 @@ static list<std::string> Name(
          "the -regex option <pattern> is interpreted as a regular expression."),
     value_desc("pattern"), cat(DwarfDumpCategory));
 static alias NameAlias("n", desc("Alias for -name"), aliasopt(Name));
-static opt<uint64_t>
-    Lookup("lookup",
-           desc("Lookup <address> in the debug information and print out any "
+static list<std::string> Lookup(
+    "lookup",
+    desc("Lookup <address> in the debug information and print out any "
                 "available file, function, block and line table details."),
-           value_desc("address"), cat(DwarfDumpCategory));
+    value_desc("address"), cat(DwarfDumpCategory));
 static opt<std::string>
     OutputFilename("o", cl::init("-"),
                    cl::desc("Redirect output to the specified file."),
@@ -385,27 +387,37 @@ static void filterByAccelName(ArrayRef<std::string> Names, DWARFContext &DICtx,
 /// different sections(in case not-linked object file). llvm-dwarfdump
 /// need to do something with this: extend lookup option with section
 /// information or probably display all matched entries, or something else...
-static bool lookup(ObjectFile &Obj, DWARFContext &DICtx, uint64_t Address,
+static bool lookup(ObjectFile &Obj, DWARFContext &DICtx, ArrayRef<std::string> AddressList,
                    raw_ostream &OS) {
-  auto DIEsForAddr = DICtx.getDIEsForAddress(Lookup);
 
-  if (!DIEsForAddr)
-    return false;
+  uint64_t address;
 
-  DIDumpOptions DumpOpts = getDumpOpts();
-  DumpOpts.ChildRecurseDepth = 0;
-  DIEsForAddr.CompileUnit->dump(OS, DumpOpts);
-  if (DIEsForAddr.FunctionDIE) {
-    DIEsForAddr.FunctionDIE.dump(OS, 2, DumpOpts);
-    if (DIEsForAddr.BlockDIE)
-      DIEsForAddr.BlockDIE.dump(OS, 4, DumpOpts);
+  for (std::string addressStr : AddressList) {
+
+    address = strtoull(const_cast<char*>(addressStr.c_str()), NULL, 0);
+
+    auto DIEsForAddr = DICtx.getDIEsForAddress(address);
+    OS << "Address: " << addressStr;
+
+    if (DIEsForAddr) {
+      if (DIEsForAddr.FunctionDIE) {
+        auto name = DIEsForAddr.FunctionDIE.find(dwarf::DW_AT_name);
+        if (name) {
+          OS << ", Function: " << name->getAsCString(); 
+        
+          // TODO: it is neccessary to set proper SectionIndex here.
+          // object::SectionedAddress::UndefSection works for only absolute addresses.
+          if (DILineInfo LineInfo = DICtx.getLineInfoForAddress(
+                  {address, object::SectionedAddress::UndefSection})) {
+            OS << ", LineInfo: " << LineInfo.FileName << ":" << LineInfo.Line;
+          }
+        
+        }
+      }
+    }
+    
+    OS << "\n";
   }
-
-  // TODO: it is neccessary to set proper SectionIndex here.
-  // object::SectionedAddress::UndefSection works for only absolute addresses.
-  if (DILineInfo LineInfo = DICtx.getLineInfoForAddress(
-          {Lookup, object::SectionedAddress::UndefSection}))
-    LineInfo.dump(OS);
 
   return true;
 }
@@ -422,8 +434,9 @@ static bool dumpObjectFile(ObjectFile &Obj, DWARFContext &DICtx, Twine Filename,
     OS << Filename << ":\tfile format " << Obj.getFileFormatName() << '\n';
 
   // Handle the --lookup option.
-  if (Lookup)
+  if (!Lookup.empty()) {
     return lookup(Obj, DICtx, Lookup, OS);
+  }
 
   // Handle the --name option.
   if (!Name.empty()) {
